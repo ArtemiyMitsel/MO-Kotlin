@@ -1,11 +1,13 @@
+import kotlinx.coroutines.*
+import java.awt.Color
+import java.awt.Font
+import java.awt.image.BufferedImage
+import java.io.File
+import java.util.*
+import javax.imageio.ImageIO
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sqrt
-import java.awt.Color
-import java.awt.image.BufferedImage
-import java.awt.Font
-import javax.imageio.ImageIO
-import java.io.File
-import kotlin.math.abs
 
 fun quadratic(point: DoubleArray): Double {
     return (point[0] - 2).pow(2) + (point[1] + 3).pow(2)
@@ -171,6 +173,7 @@ fun plotContourAndTrajectory(
         }
     }
 
+    // неприятная часть - рисование дуг
     val levels = 20
     val deltaZ = (maxZValue - minZValue) / levels
     for (level in 0..levels) {
@@ -196,7 +199,8 @@ fun plotContourAndTrajectory(
                     val t = (contourValue - z1) / (z2 - z1)
                     val xc = i + t
                     val yc = j
-                    graphics.drawLine((xc * width / (width - 1)).toInt(), ((height - yc) * height / (height - 1)),
+                    graphics.drawLine(
+                        (xc * width / (width - 1)).toInt(), ((height - yc) * height / (height - 1)),
                         ((xc + xStep) * width / (width - 1)).toInt(), ((height - yc) * height / (height - 1))
                     )
                 }
@@ -206,13 +210,15 @@ fun plotContourAndTrajectory(
                     val yc = j + t
                     graphics.drawLine(
                         (xc * width / (width - 1)), ((height - yc) * height / (height - 1)).toInt(),
-                        (xc * width / (width - 1)), ((height - (yc + yStep)) * height / (height - 1)).toInt())
+                        (xc * width / (width - 1)), ((height - (yc + yStep)) * height / (height - 1)).toInt()
+                    )
                 }
                 if ((z3 < contourValue && z4 >= contourValue) || (z3 >= contourValue && z4 < contourValue)) {
                     val t = (contourValue - z3) / (z4 - z3)
                     val xc = i + t
                     val yc = j + 1
-                    graphics.drawLine((xc * width / (width - 1)).toInt(), ((height - yc) * height / (height - 1)),
+                    graphics.drawLine(
+                        (xc * width / (width - 1)).toInt(), ((height - yc) * height / (height - 1)),
                         ((xc + xStep) * width / (width - 1)).toInt(), ((height - yc) * height / (height - 1))
                     )
                 }
@@ -222,7 +228,8 @@ fun plotContourAndTrajectory(
                     val yc = j + t
                     graphics.drawLine(
                         (xc * width / (width - 1)), ((height - yc) * height / (height - 1)).toInt(),
-                        (xc * width / (width - 1)), ((height - (yc + yStep)) * height / (height - 1)).toInt())
+                        (xc * width / (width - 1)), ((height - (yc + yStep)) * height / (height - 1)).toInt()
+                    )
                 }
             }
         }
@@ -245,64 +252,78 @@ fun plotContourAndTrajectory(
         val endY = ((ylim.second - trajectory.last()[1]) / (ylim.second - ylim.first) * height).toInt()
         graphics.drawString("End (${trajectory.last()[0]}, ${trajectory.last()[1]})", endX, endY)
     }
-    
+
     val outputFile = File(imgName ?: "$titlePrefix.png")
     ImageIO.write(image, "png", outputFile)
 }
 
+suspend fun plotAsync(
+    function: (DoubleArray) -> Double,
+    startPoint: DoubleArray,
+    xlim: Pair<Double, Double>,
+    ylim: Pair<Double, Double>,
+    titlePrefix: String,
+    trajectories: Map<String, List<DoubleArray>>,
+    imgName: String? = null
+) = withContext(Dispatchers.Default) {
+    plotContourAndTrajectory(function, startPoint, xlim, ylim, titlePrefix, trajectories, imgName)
+}
+
+fun asyncAll() = runBlocking {
+    val startPoints = mapOf(
+        "quadratic" to doubleArrayOf(0.5, -2.0),
+        "rosenbrock" to doubleArrayOf(-1.0, 2.0),
+        "heavyQuadratic" to doubleArrayOf(0.5, -2.0)
+    )
+
+    val functions = listOf(
+        Triple("Quadratic Function", ::quadratic, ::quadraticGrad),
+        Triple("Rosenbrock Function", ::rosenbrock, ::rosenbrockGrad),
+        Triple("Heavy Quadratic Function", ::heavyQuadratic, ::heavyQuadraticGrad)
+    )
+
+    val methods = listOf(
+        "const descent" to { f: (DoubleArray) -> Double, g: (DoubleArray) -> DoubleArray, p: DoubleArray ->
+            gradientDescentWithTrajectory(g, p)
+        },
+        "dich descent" to { f: (DoubleArray) -> Double, g: (DoubleArray) -> DoubleArray, p: DoubleArray ->
+            gradientDescentDichotomyWithTrajectory(f, g, p)
+        },
+        "golden section descent" to { f: (DoubleArray) -> Double, g: (DoubleArray) -> DoubleArray, p: DoubleArray ->
+            gradientDescentGoldenSectionWithTrajectory(f, g, p)
+        }
+    )
+
+    val jobs = mutableListOf<Deferred<Unit>>()
+    for ((name, function, gradFunction) in functions) {
+        val startPoint = startPoints[name.split(" ")[0].lowercase(Locale.getDefault())] ?: doubleArrayOf(0.5, -2.0)
+        var xLim: Pair<Double, Double>
+        var yLim: Pair<Double, Double>
+        if (name == "Rosenbrock Function") {
+            xLim = Pair(-2.0, 2.0)
+            yLim = Pair(-1.0, 3.0)
+        } else {
+            xLim = Pair(0.0, 3.0)
+            yLim =  Pair(-5.0, -1.0)
+        }
+        for ((methodName, method) in methods) {
+            jobs += async {
+                val (_, trajectory) = method(function, gradFunction, startPoint)
+                plotAsync(
+                    function,
+                    startPoint,
+                    xLim,
+                    yLim,
+                    "$name ($methodName)",
+                    mapOf(methodName.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault())
+                                                        else it.toString() } to trajectory)
+                )
+            }
+        }
+    }
+    jobs.awaitAll()
+}
+
 fun main() {
-    val startPointQuadratic = doubleArrayOf(0.5, -2.0)
-    val startPointRosenbrock = doubleArrayOf(-1.0, 2.0)
-    val (_, trajectoryQ) = gradientDescentWithTrajectory(::quadraticGrad, startPointQuadratic)
-    plotContourAndTrajectory(
-        ::quadratic, startPointQuadratic, Pair(0.0, 3.0), Pair(-5.0, -1.0), "Quadratic Function (const descent)",
-        mapOf("Gradient Descent" to trajectoryQ)
-    )
-
-    val (_, trajectoryR) = gradientDescentWithTrajectory(::rosenbrockGrad, startPointRosenbrock)
-    plotContourAndTrajectory(
-        ::rosenbrock, startPointRosenbrock, Pair(-2.0, 2.0), Pair(-1.0, 3.0), "Rosenbrock Function (const descent)",
-        mapOf("Gradient Descent" to trajectoryR)
-    )
-
-    val (_, trajectoryHQ) = gradientDescentWithTrajectory(::heavyQuadraticGrad, startPointQuadratic)
-    plotContourAndTrajectory(
-        ::heavyQuadratic, startPointQuadratic, Pair(0.0, 3.0), Pair(-5.0, -1.0), "Heavy Quadratic Function (const descent)",
-        mapOf("Gradient Descent" to trajectoryHQ)
-    )
-    val (_, trajectoryQD) = gradientDescentDichotomyWithTrajectory(::quadratic,::quadraticGrad, startPointQuadratic)
-    plotContourAndTrajectory(
-        ::quadratic, startPointQuadratic, Pair(0.0, 3.0), Pair(-5.0, -1.0), "Quadratic Function (dich descent)",
-        mapOf("Dichotomy" to trajectoryQD)
-    )
-
-    val (_, trajectoryRD) = gradientDescentDichotomyWithTrajectory(::rosenbrock, ::rosenbrockGrad, startPointRosenbrock)
-    plotContourAndTrajectory(
-        ::rosenbrock, startPointRosenbrock, Pair(-2.0, 2.0), Pair(-1.0, 3.0), "Rosenbrock Function (dich descent)",
-        mapOf("Dichotomy" to trajectoryRD)
-    )
-
-    val (_, trajectoryHQD) = gradientDescentDichotomyWithTrajectory(::heavyQuadratic, ::heavyQuadraticGrad, startPointQuadratic)
-    plotContourAndTrajectory(
-        ::heavyQuadratic, startPointQuadratic, Pair(0.0, 3.0), Pair(-5.0, -1.0), "Heavy Quadratic Function (dich descent)",
-        mapOf("Dichotomy" to trajectoryHQD)
-    )
-
-    val (_, trajectoryQG) = gradientDescentGoldenSectionWithTrajectory(::quadratic,::quadraticGrad, startPointQuadratic)
-    plotContourAndTrajectory(
-        ::quadratic, startPointQuadratic, Pair(0.0, 3.0), Pair(-5.0, -1.0), "Quadratic Function (golden section descent)",
-        mapOf("Golden Section" to trajectoryQG)
-    )
-
-    val (_, trajectoryRG) = gradientDescentGoldenSectionWithTrajectory(::rosenbrock, ::rosenbrockGrad, startPointRosenbrock)
-    plotContourAndTrajectory(
-        ::rosenbrock, startPointRosenbrock, Pair(-2.0, 2.0), Pair(-1.0, 3.0), "Rosenbrock Function (golden section descent)",
-        mapOf("Golden Section" to trajectoryRG)
-    )
-
-    val (_, trajectoryHQG) = gradientDescentGoldenSectionWithTrajectory(::heavyQuadratic, ::heavyQuadraticGrad, startPointQuadratic)
-    plotContourAndTrajectory(
-        ::heavyQuadratic, startPointQuadratic, Pair(0.0, 3.0), Pair(-5.0, -1.0), "Heavy Quadratic Function (golden section descent)",
-        mapOf("Golden Section" to trajectoryHQG)
-    )
+    asyncAll()
 }
